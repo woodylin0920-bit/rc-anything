@@ -1,43 +1,51 @@
-# rc-anything
+# vibe-stack
 
-A [Claude Code](https://code.claude.com/docs/en/cli-reference) skill: **`claude-code`** — a comprehensive orchestration guide for delegating coding tasks to the Claude Code CLI (Anthropic's autonomous coding agent).
+A Hermes skill playbook for **controlling coding agents from your phone** — spawn agents, assign tasks, review output, and merge work, all via chat. Watch a session in a mobile/web app; steer it from a chat message.
 
-It covers print mode vs. interactive PTY sessions, the full CLI flag reference, settings & `CLAUDE.md` hierarchy, slash commands, hooks, custom subagents, MCP integration, PR-review patterns, parallel instances, and launching with `--remote-control`.
+## Skills
+
+| Skill | What it does |
+|-------|--------------|
+| [`agent-manager`](agent-manager/SKILL.md) | The **control plane** — open an agent (Claude Code / Codex / OpenCode) in a project, send tasks, drive slash commands and control keys remotely via the orchestrator, detect interactive prompts, check status, review output, and handle each agent's launch + auth. |
+| [`claude-code`](claude-code/SKILL.md) | Deep orchestration guide for the **Claude Code CLI** — print vs interactive PTY modes, the essential flag reference, settings & `CLAUDE.md` hierarchy, slash commands, hooks, subagents, MCP, PR-review patterns, and `--remote-control`. |
 
 ## Contents
 
 ```
+agent-manager/
+  SKILL.md    # remote control plane for coding agents
 claude-code/
-  SKILL.md    # the skill guide
+  SKILL.md    # Claude Code CLI orchestration guide
 ```
 
 ## Install as a Hermes skill
 
-One-liner:
+One-liner per skill:
 
 ```bash
-hermes skills install https://raw.githubusercontent.com/woodylin0920-bit/rc-anything/main/claude-code/SKILL.md
+hermes skills install https://raw.githubusercontent.com/woodylin0920-bit/vibe-stack/main/agent-manager/SKILL.md
+hermes skills install https://raw.githubusercontent.com/woodylin0920-bit/vibe-stack/main/claude-code/SKILL.md
 ```
 
 ## Install as a Claude Code skill
 
-Drop it into your skills directory:
+Drop a skill folder into your skills directory:
 
 ```bash
 # Personal (all projects)
 mkdir -p ~/.claude/skills
-cp -r claude-code ~/.claude/skills/
+cp -r agent-manager claude-code ~/.claude/skills/
 
 # or Project-scoped (team-shared, git-tracked)
 mkdir -p .claude/skills
-cp -r claude-code .claude/skills/
+cp -r agent-manager claude-code .claude/skills/
 ```
 
-Claude Code auto-discovers skills in `.claude/skills/` and invokes them by natural language when a task matches the skill's `description`. Just ask Claude to delegate a coding task to the Claude Code CLI and it will pull in this guide.
+Claude Code auto-discovers skills in `.claude/skills/` and invokes them by natural language when a task matches the skill's `description`.
 
 ## Use as a reference
 
-`claude-code/SKILL.md` also works standalone — read it as a cheat sheet for the Claude Code CLI, its flags, and automation patterns.
+Each `SKILL.md` also works standalone — read it as a cheat sheet for driving coding-agent CLIs.
 
 ## License
 
