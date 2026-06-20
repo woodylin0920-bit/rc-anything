@@ -1,7 +1,7 @@
 ---
 name: agent-manager
 description: "Remote control plane for coding agents (Claude Code, Codex, OpenCode) — open an agent in a project, send tasks, drive slash commands/keys from a chat app, check status, review output, and handle per-agent auth."
-version: 1.3.0
+version: 1.4.0
 author: Hermes Agent + Teknium
 license: MIT
 platforms: [linux, macos, windows]
@@ -55,6 +55,17 @@ Nothing in this skill is Telegram-specific. Wherever you read "send to the user"
 - **Surface prompts the instant they appear — unprompted.** The moment a new prompt / selection / permission / plan-review screen shows up, *at any time* (not only right after a dispatch), push it to the user without being asked. A silent agent sitting on a dialog is a bug, not a pause.
 - **Keep watching until a terminal state.** Continue monitoring (event-driven `watch_patterns` + idle fallback, see below) until the agent is unambiguously **done**, **errored**, or **waiting on the user** — then report.
 - **"Dispatched" ≠ "done."** "I sent the task" is not a result. Only an *observed* outcome (files changed, tests run, commit made) counts as completion.
+
+### Proactive status reporting (human-facing)
+The human-facing half of never-go-silent — the user should **never have to ask "what's happening?"**
+- **Poll periodically.** Beyond the 3–5 s post-injection check, `capture-pane` every **30–60 s** while a task runs.
+- **Report unprompted on change** — task done, blocked, decision needed, a notable milestone. Don't wait to be asked; don't narrate every line either — report *changes*, not heartbeats.
+- **Consistent format**, one line per agent — `session · status · what it's doing · blocker (if any)`:
+  ```
+  claude-api · working · running auth tests (3/12) · —
+  codex-omni · blocked · permission prompt · needs your OK to write outside the repo
+  ```
+- For a fleet, send a compact roll-up (one line per lane) on change; stay quiet when nothing meaningful moved.
 
 How the rest of the skill serves this: the [chat-input pattern](#-the-remote-control--chat-input-pattern-first-class) is how you *act*, [prompt detection](#detecting-interactive-prompts-so-the-agent-doesnt-sit-silently) is how you *watch*, and the [Decision Gate](#️-decision-gate) is what you do when watching surfaces a choice.
 
