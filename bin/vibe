@@ -24,6 +24,8 @@ VIBE_COLS="${VIBE_COLS:-200}"
 VIBE_ROWS="${VIBE_ROWS:-50}"
 VIBE_BOOT_WAIT="${VIBE_BOOT_WAIT:-3}"   # seconds to let the agent UI come up before pasting
 VIBE_SAMPLE="${VIBE_SAMPLE:-0.4}"       # seconds between the two captures used to detect motion
+# Where per-session task descriptions live (written by `vibe new` / `vibe task`).
+VIBE_TASK_DIR="${VIBE_TASK_DIR:-$HOME/.vibe-stack/tasks}"
 
 die() { printf 'vibe: %s\n' "$*" >&2; exit 1; }
 
@@ -118,6 +120,39 @@ home_short() {
     esac
   fi
   printf '%s' "$p"
+}
+
+# Format a duration (seconds) compactly: "3d 4h", "2h 14m", "45m", "12s".
+fmt_uptime() {
+  local s="$1" d h m
+  [ "$s" -lt 0 ] && s=0
+  d=$(( s / 86400 )); h=$(( (s % 86400) / 3600 )); m=$(( (s % 3600) / 60 ))
+  if   [ "$d" -gt 0 ]; then printf '%dd %dh' "$d" "$h"
+  elif [ "$h" -gt 0 ]; then printf '%dh %dm' "$h" "$m"
+  elif [ "$m" -gt 0 ]; then printf '%dm' "$m"
+  else                      printf '%ds' "$s"
+  fi
+}
+
+# Format an elapsed duration (seconds) as a coarse "14m ago" / "2h ago" / "3d ago".
+fmt_ago() {
+  local s="$1"
+  [ "$s" -lt 0 ] && s=0
+  if   [ "$s" -ge 86400 ]; then printf '%dd ago' "$(( s / 86400 ))"
+  elif [ "$s" -ge 3600 ];  then printf '%dh ago' "$(( s / 3600 ))"
+  elif [ "$s" -ge 60 ];    then printf '%dm ago' "$(( s / 60 ))"
+  else                          printf '%ds ago' "$s"
+  fi
+}
+
+# Echo a session's one-line task description (truncated), or nothing if unset.
+task_desc() {
+  local f="$VIBE_TASK_DIR/$1.txt" t=""
+  [ -f "$f" ] || return 0
+  IFS= read -r t < "$f" 2>/dev/null || true
+  t=${t//$'\t'/ }
+  [ ${#t} -gt 70 ] && t="${t:0:69}…"
+  printf '%s' "$t"
 }
 
 # Echo the name of every tmux session running a coding agent, one per line.
@@ -223,6 +258,88 @@ cmd_list() {
   printf '[%s]\n' "$out"
 }
 
+cmd_summary() {
+  local now; now=$(date +%s)
+
+  local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/vibe.XXXXXX") || die "mktemp failed"
+  trap "rm -rf '$tmp'" EXIT
+  local meta="$tmp/meta"; : > "$meta"
+
+  # Pass 1: discover agent sessions; snapshot pane, workdir, and start time.
+  local name line cmd path created agent key
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    line=$(tmux display-message -p -t "$name" '#{pane_current_command}	#{pane_current_path}	#{session_created}' 2>/dev/null) || continue
+    cmd=${line%%	*}; line=${line#*	}; path=${line%%	*}; created=${line##*	}
+    agent=$(classify "$name" "$cmd") || continue
+    key=$(printf '%s' "$name" | tr -c 'A-Za-z0-9_' '_')
+    capture_tail "$name" > "$tmp/A.$key"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$agent" "$path" "$created" "$key" >> "$meta"
+  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+
+  local count; count=$(grep -c '' "$meta" 2>/dev/null || printf 0)
+  if [ "$count" -eq 0 ]; then
+    printf '🤖 vibe-stack — no agents running\n'
+    return
+  fi
+
+  sleep "$VIBE_SAMPLE"
+
+  # Pass 2: classify each pane and build aligned rows; collect branches + pushes.
+  local rows="$tmp/rows"; : > "$rows"
+  local branches="$tmp/branches"; : > "$branches"
+  local pushes="$tmp/pushes"; : > "$pushes"
+  local before after state short up task br push
+  while IFS=$'\t' read -r name agent path created key; do
+    before=$(cat "$tmp/A.$key" 2>/dev/null)
+    after=$(capture_tail "$name")
+    state=$(detect_state "$before" "$after")
+    short=$(home_short "$path")
+    up=$(fmt_uptime $(( now - created )))
+    task=$(task_desc "$name")
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$(state_emoji "$state")" "$name" "$state" "$short" "$up" "$task" >> "$rows"
+
+    br=$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null) \
+      && [ "$br" != "HEAD" ] && printf '%s\n' "$br" >> "$branches"
+    push=$(git -C "$path" for-each-ref --sort=-committerdate \
+      --format='%(committerdate:unix)' refs/remotes/origin 2>/dev/null | head -1)
+    [ -n "$push" ] && printf '%s\n' "$push" >> "$pushes"
+  done < "$meta"
+
+  # Header.
+  local noun="agents"; [ "$count" -eq 1 ] && noun="agent"
+  printf '🤖 vibe-stack — %d %s running\n\n' "$count" "$noun"
+
+  # Pad the name and state columns to their widest value.
+  local wn=0 ws=0 e n s d u t
+  while IFS=$'\t' read -r e n s d u t; do
+    [ ${#n} -gt "$wn" ] && wn=${#n}
+    [ ${#s} -gt "$ws" ] && ws=${#s}
+  done < "$rows"
+  while IFS=$'\t' read -r e n s d u t; do
+    printf '%-*s %s %-*s  %s  [%s]\n' "$wn" "$n" "$e" "$ws" "$s" "$d" "$u"
+    [ -n "$t" ] && printf '%*s ↳ %s\n' "$wn" "" "$t"
+  done < "$rows"
+
+  # Branches in play across the agents' workdirs (deduped).
+  local list="" b
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    [ -n "$list" ] && list="$list, "
+    list="$list$b"
+  done < <(sort -u "$branches" 2>/dev/null)
+  [ -n "$list" ] && printf '\nBranches: %s\n' "$list"
+
+  # Most recent push across those repos.
+  local maxpush=0 p
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [ "$p" -gt "$maxpush" ] 2>/dev/null && maxpush="$p"
+  done < "$pushes"
+  [ "$maxpush" -gt 0 ] && printf 'Last push: %s\n' "$(fmt_ago $(( now - maxpush )))"
+}
+
 cmd_send() {
   [ $# -ge 2 ] || die "usage: vibe send <session> <message...>"
   local session="$1"; shift
@@ -269,6 +386,12 @@ cmd_new() {
   fi
 
   inject "$session" "$task" || die "session $session is up, but pasting the task failed"
+
+  # Record the task so `vibe summary` can show what this agent is working on.
+  if mkdir -p "$VIBE_TASK_DIR" 2>/dev/null; then
+    printf '%s\n' "$task" > "$VIBE_TASK_DIR/$session.txt" 2>/dev/null || true
+  fi
+
   printf 'started %s (%s) in %s\n' "$session" "$agent" "$workdir"
 }
 
@@ -287,6 +410,7 @@ vibe — shell API for Hermes agent orchestration
 
   vibe status                                   JSON: agent sessions, state, last 3 lines
   vibe status --pretty                          human-readable table (no lines) — for chat/Telegram
+  vibe summary                                  rich one-message overview (state, uptime, task) — for chat/Telegram
   vibe list                                     JSON array of agent session names
   vibe list --pretty                            session names, one per line
   vibe send <session> <message...>              send a message (CJK-safe), press Enter
@@ -305,6 +429,7 @@ main() {
   local sub="$1"; shift
   case "$sub" in
     status)            cmd_status "$@";;
+    summary)           cmd_summary "$@";;
     list|ls)           cmd_list "$@";;
     send)              cmd_send "$@";;
     new)               cmd_new "$@";;
