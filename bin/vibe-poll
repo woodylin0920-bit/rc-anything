@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+#
+# vibe-poll — the "never spam" engine for Telegram-native status.
+#
+# Diffs the current fleet state (from `vibe status`) against the previous poll and
+# prints a digest ONLY when a session changed state (working→idle, →waiting-input,
+# a new session, a session that ended). Silent when nothing meaningful moved — so the
+# orchestrator relays a Telegram message only when there is something to say.
+#
+# Decision-points (a lane finished, or a lane needs input) are tagged with a
+# [DECISION: …] marker so the orchestrator knows to raise a `clarify` button prompt
+# instead of just relaying text. See docs/telegram-ux.md and overnight/SKILL.md.
+#
+#   vibe-poll              emit a digest of CHANGES since the last poll; silent if none; saves state
+#   vibe-poll --full       emit the full current dashboard (every session) regardless; saves state
+#   vibe-poll --decisions  read-only: list sessions needing a decision NOW; does not save state
+#   vibe-poll --reset      clear the saved snapshot (next poll re-baselines)
+#
+# Pairs with `vibe` (bin/vibe) — found on PATH or as a sibling of this script.
+# Written for bash 3.2 (stock macOS): no associative arrays, no mapfile.
+set -u
+
+STATE_DIR="${VIBE_STATE_DIR:-$HOME/.vibe-stack}"
+SNAP="$STATE_DIR/poll-snapshot.tsv"
+
+# Locate the `vibe` CLI: PATH first, then a sibling of this script.
+if command -v vibe >/dev/null 2>&1; then
+  VIBE="vibe"
+else
+  _self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+  if [ -x "$_self_dir/vibe" ]; then VIBE="$_self_dir/vibe"
+  else echo "vibe-poll: cannot find the 'vibe' CLI on PATH or beside this script" >&2; exit 2; fi
+fi
+
+# State → status light (mirrors `vibe`'s vocabulary).
+emoji() {
+  case "$1" in
+    idle)          printf '🟢';;
+    working)       printf '🔵';;
+    waiting-input) printf '🟡';;
+    *)             printf '🔴';;
+  esac
+}
+
+# Parse `vibe status` (JSON) into "session<TAB>state" lines, one per agent.
+# Within each JSON object the order is session…state, and we grep only those two
+# keys, so a simple session→state pairing is correct. tmux session names and state
+# words contain no spaces, keeping this robust without a JSON parser.
+parse_status() {
+  "$VIBE" status 2>/dev/null \
+    | grep -oE '"(session|state)":"[^"]*"' \
+    | sed -E 's/^"session":"(.*)"$/S \1/; s/^"state":"(.*)"$/T \1/' \
+    | awk '$1=="S"{s=$2; next} $1=="T"{print s"\t"$2}'
+}
+
+# Echo the state recorded for session $1 in file $2 (empty if absent).
+lookup() { awk -F'\t' -v k="$1" '$1==k{print $2; exit}' "$2" 2>/dev/null; }
+
+# Decision marker for a session that just *transitioned* to state $1 (from $2).
+# Used in the change digest so a decision surfaces exactly once, on the transition.
+#   reached waiting-input          → needs the user's input
+#   reached idle from active work  → task finished, ready for a merge decision
+decision_tag() {
+  local new="$1" old="$2"
+  case "$new" in
+    waiting-input) printf ' [DECISION: input]';;
+    idle) case "$old" in working|waiting-input) printf ' [DECISION: done]';; esac;;
+  esac
+}
+
+# Decision marker based purely on the *current* state (for --decisions, which answers
+# "who needs me right now?" on demand — independent of whether we polled it before).
+decision_now() {
+  case "$1" in
+    waiting-input) printf ' [DECISION: input]';;
+    idle)          printf ' [DECISION: done]';;
+  esac
+}
+
+mode="changes"
+case "${1:-}" in
+  --full)            mode="full";;
+  --decisions)       mode="decisions";;
+  --reset)           rm -f "$SNAP" 2>/dev/null; echo "vibe-poll: snapshot cleared"; exit 0;;
+  -h|--help|help)    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+  "")                ;;
+  *)                 echo "vibe-poll: unknown option: $1 (try --help)" >&2; exit 2;;
+esac
+
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/vibe-poll.XXXXXX") || { echo "vibe-poll: mktemp failed" >&2; exit 2; }
+trap 'rm -rf "$tmp"' EXIT
+
+curf="$tmp/cur"; parse_status > "$curf"
+prevf="$tmp/prev"; [ -f "$SNAP" ] && cp "$SNAP" "$prevf" 2>/dev/null || : > "$prevf"
+count=$(grep -c . "$curf" 2>/dev/null || true)
+
+# ── --full: the whole current dashboard, always ──────────────────────────────
+if [ "$mode" = "full" ]; then
+  if [ "$count" -eq 0 ]; then echo "🤖 vibe-stack — no agents running"
+  else
+    plural=s; [ "$count" -eq 1 ] && plural=''
+    printf '🤖 vibe-stack — %s agent%s\n' "$count" "$plural"
+    while IFS=$'\t' read -r sess st; do
+      [ -n "$sess" ] || continue
+      printf '%s %s · %s%s\n' "$(emoji "$st")" "$sess" "$st" "$(decision_tag "$st" "$(lookup "$sess" "$prevf")")"
+    done < "$curf"
+  fi
+  cp "$curf" "$SNAP" 2>/dev/null || true
+  exit 0
+fi
+
+# ── --decisions: read-only; who needs me right now? ──────────────────────────
+if [ "$mode" = "decisions" ]; then
+  out="$tmp/out"; : > "$out"
+  while IFS=$'\t' read -r sess st; do
+    [ -n "$sess" ] || continue
+    tag=$(decision_now "$st")
+    [ -n "$tag" ] && printf '%s %s · %s%s\n' "$(emoji "$st")" "$sess" "$st" "$tag" >> "$out"
+  done < "$curf"
+  [ -s "$out" ] && cat "$out"
+  exit 0
+fi
+
+# ── default: changes since the last poll ─────────────────────────────────────
+# First run with no snapshot: establish a baseline (one concise line, not spam).
+if [ ! -f "$SNAP" ]; then
+  cp "$curf" "$SNAP" 2>/dev/null || true
+  if [ "$count" -gt 0 ]; then
+    plural=s; [ "$count" -eq 1 ] && plural=''
+    printf '🤖 vibe-stack — now watching %s agent%s\n' "$count" "$plural"
+  fi
+  exit 0
+fi
+
+out="$tmp/out"; : > "$out"
+
+# New + transitioned sessions.
+while IFS=$'\t' read -r sess st; do
+  [ -n "$sess" ] || continue
+  old=$(lookup "$sess" "$prevf")
+  if [ -z "$old" ]; then
+    printf '▶ %s · started · %s\n' "$sess" "$st" >> "$out"
+  elif [ "$old" != "$st" ]; then
+    printf '%s %s · %s → %s%s\n' "$(emoji "$st")" "$sess" "$old" "$st" "$(decision_tag "$st" "$old")" >> "$out"
+  fi
+done < "$curf"
+
+# Sessions that disappeared since last poll.
+while IFS=$'\t' read -r sess st; do
+  [ -n "$sess" ] || continue
+  [ -z "$(lookup "$sess" "$curf")" ] && printf '✗ %s · ended\n' "$sess" >> "$out"
+done < "$prevf"
+
+# Save the new snapshot for the next poll.
+cp "$curf" "$SNAP" 2>/dev/null || true
+
+# Emit only if something changed — this is the whole point (never spam).
+if [ -s "$out" ]; then
+  n=$(grep -c . "$out")
+  plural=s; [ "$n" -eq 1 ] && plural=''
+  printf '🤖 vibe-stack — %s change%s\n' "$n" "$plural"
+  cat "$out"
+fi
+exit 0
