@@ -1,7 +1,7 @@
 ---
 name: overnight
 description: "Unattended, goal-driven autonomy loop — give the orchestrator a goal before bed; it decomposes the work into isolated lanes, spawns coding agents with `vibe new`, polls every 60s, gates each finished lane through `vibe-review`, surfaces every real decision, and reports results to your channel. Built on agent-manager + vibe + vibe-poller."
-version: 1.0.0
+version: 1.1.0
 author: Hermes Agent + Teknium
 license: MIT
 platforms: [linux, macos, windows]
@@ -69,10 +69,13 @@ Pure shell, bash 3.2. Deps: `vibe`, `vibe-review`, `python3` (JSON parsing, alre
 # finishes; emit events for the orchestrator to relay. Stays silent when quiet.
 set -u
 POLL="${OVERNIGHT_POLL:-60}"                         # seconds between polls
+HEARTBEAT="${OVERNIGHT_HEARTBEAT:-1800}"             # seconds between summary pings (30 min)
 STATE="${VIBE_STATE_DIR:-$HOME/.vibe-stack}/overnight-state.tsv"
 mkdir -p "$(dirname "$STATE")"; [ -f "$STATE" ] || : > "$STATE"
 prev() { awk -F'\t' -v s="$1" '$1==s{print $2; exit}' "$STATE"; }
 
+hb_every=$(( HEARTBEAT / POLL )); [ "$hb_every" -ge 1 ] || hb_every=1
+tick=0
 while :; do
   now=$(mktemp)
   vibe status | python3 -c 'import sys,json
@@ -118,9 +121,34 @@ for a in json.load(sys.stdin): print(a["session"]+"\t"+a["state"])' > "$now" 2>/
   done < "$now"
 
   mv "$now" "$STATE"
+
+  # Heartbeat: every ~30 min push a full summary unprompted — reassurance the
+  # run is alive even when nothing changed (distinct from the event pings above).
+  tick=$(( tick + 1 ))
+  if [ $(( tick % hb_every )) -eq 0 ]; then
+    printf '💓 overnight heartbeat (%sm in):\n' "$(( tick * POLL / 60 ))"
+    vibe summary
+  fi
+
   sleep "$POLL"
 done
 ```
+
+## Heartbeat — still-alive ping (every 30 min)
+Event notifications go silent when nothing moves — which is *correct* for [vibe-poller](../vibe-poller/SKILL.md), but over a long unattended run a long silence is ambiguous: is it working, or did it die? The heartbeat resolves that. **Every 30 minutes, overnight pushes a full `vibe summary` to your channel unprompted — even when no state changed.**
+
+- It's **time-driven, not event-driven** — it fires on a fixed cadence regardless of activity, the complement to the poller's change-only pings.
+- It carries the rich snapshot (`vibe summary`: per-agent state, workdir, elapsed, current task, branches, last commit) — enough to glance at your phone and know the run is healthy.
+- Cadence is `OVERNIGHT_HEARTBEAT` seconds (default `1800` = 30 min); the watch loop emits it every `HEARTBEAT / POLL` cycles, so it stays aligned with the 60s poll.
+```
+💓 overnight heartbeat (30m in):
+🤖 vibe-stack status — 2 agents running
+claude-jwt-refresh 🔵 working        ~/lanes/jwt-refresh   [0h 32m]
+   └─ Task: add JWT refresh + rotate
+claude-jwt-tests   🟡 waiting-input  ~/lanes/jwt-tests     [0h 12m]
+   └─ Waiting for your input · write auth_test.py
+```
+This is the heartbeat the [vibe-poller](../vibe-poller/SKILL.md) rules refer you to: *report changes, not heartbeats* for events — and run **this** for the periodic "still alive" reassurance.
 
 ## Rules (inherited from agent-manager)
 - **Never go silent.** Poll every 60s; surface prompts and gate results unprompted ([Prime directive](../../agent-manager/SKILL.md)).
