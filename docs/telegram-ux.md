@@ -135,7 +135,7 @@ clarify(
 |---|---|---|
 | **Button per decision** (Merge/Diff/Keep working) | `clarify(question, ["✅ Merge","👀 Show diff","🔄 Keep working"])` | **No** — full fidelity. |
 | **Never spam** | `vibe-poll` keeps a per-session state fingerprint and emits **only on state transition**; silent otherwise. The orchestrator relays poll output via `send_message` *only when there is output*. | **No** — the spirit ("a message is an event") is fully met. |
-| **One live dashboard, edited in place** | Can't edit/pin from a skill. Degrade to **send-the-dashboard-only-when-it-changed** (`vibe-poll --digest`): one consolidated message per meaningful change, not a stream. | **Partial** — it's a fresh message, not an in-place edit. Tracked as issue ① + ③. |
+| **One live dashboard, edited in place** | Can't edit/pin from a skill. Degrade to **send-only-when-it-changed**: `vibe-poll` (default) emits a consolidated digest *only* on a state change; `vibe-poll --full` renders the whole dashboard on demand. One message per meaningful change, not a stream. | **Partial** — it's a fresh message, not an in-place edit. Tracked as issue ① + ③. |
 | **Pinned status** | Not possible from a skill. The most-recent digest is the de-facto status. | **Yes** — tracked as issue ②. |
 | **Ephemeral / auto-delete events** | Not possible from a skill. Mitigated by emitting rarely (dedup) so there's little to clean up. | **Partial** — tracked as issue ④. |
 
