@@ -40,6 +40,14 @@ have_session() { tmux has-session -t "$1" 2>/dev/null; }
 # Last N lines of a session's active pane (plain text; capture-pane strips ANSI).
 capture_tail() { tmux capture-pane -p -t "$1" -S -"${2:-60}" 2>/dev/null; }
 
+# Strip Unicode box-drawing characters (U+2500–U+257F) so agent TUI frames don't
+# clutter logs in a chat message. Forces a UTF-8 locale so sed treats the class
+# as multibyte. capture-pane already removed ANSI colour codes.
+strip_boxes() {
+  LC_ALL="${VIBE_UTF8_LOCALE:-en_US.UTF-8}" sed \
+    -e 's/[─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟┠┡┢┣┤┥┦┧┨┩┪┫┬┭┮┯┰┱┲┳┴┵┶┷┸┹┺┻┼┽┾┿╀╁╂╃╄╅╆╇╈╉╊╋╌╍╎╏═║╔╗╚╝╠╣╦╩╬╭╮╯╰╱╲╳]//g'
+}
+
 # Escape stdin for embedding inside a JSON string (no surrounding quotes).
 json_escape() {
   local s; s=$(cat)
@@ -263,6 +271,28 @@ cmd_new() {
   printf 'started %s (%s) in %s\n' "$session" "$agent" "$workdir"
 }
 
+cmd_logs() {
+  [ $# -ge 1 ] || die "usage: vibe logs <session> [--tail N]"
+  local session="$1"; shift
+  local n=20
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tail)   n="${2:-}"; shift 2 2>/dev/null || die "usage: vibe logs <session> [--tail N]";;
+      --tail=*) n="${1#--tail=}"; shift;;
+      *)        die "usage: vibe logs <session> [--tail N]";;
+    esac
+  done
+  case "$n" in ''|*[!0-9]*) die "tail must be a positive integer";; esac
+  [ "$n" -gt 0 ] || die "tail must be a positive integer"
+  have_session "$session" || die "no such session: $session"
+  # Capture a generous window so that after dropping border/blank lines we still
+  # have ~N lines of real output; strip box chars; drop blanks; take the last N.
+  capture_tail "$session" $(( n * 3 + 20 )) \
+    | strip_boxes \
+    | grep -v '^[[:space:]]*$' \
+    | tail -n "$n"
+}
+
 cmd_kill() {
   [ $# -ge 1 ] || die "usage: vibe kill <session>"
   local session="$1"
@@ -280,6 +310,7 @@ vibe — shell API for Hermes agent orchestration
   vibe status --pretty                          human-readable table (no lines) — for chat/Telegram
   vibe list                                     JSON array of agent session names
   vibe list --pretty                            session names, one per line
+  vibe logs <session> [--tail N]                last N lines of the pane (default 20), box-drawing stripped
   vibe send <session> <message...>              send a message (CJK-safe), press Enter
   vibe new  <agent> <session> <workdir> <task>  spawn agent (claude|codex|opencode), paste task
   vibe kill <session>                           tear a session down cleanly
@@ -297,6 +328,7 @@ main() {
   case "$sub" in
     status)            cmd_status "$@";;
     list|ls)           cmd_list "$@";;
+    logs|log)          cmd_logs "$@";;
     send)              cmd_send "$@";;
     new)               cmd_new "$@";;
     kill)              cmd_kill "$@";;
