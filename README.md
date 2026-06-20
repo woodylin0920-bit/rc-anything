@@ -10,6 +10,7 @@ Message a bot → it spawns Claude Code / Codex / OpenCode in your repo, drives 
 hermes skills install https://raw.githubusercontent.com/woodylin0920-bit/vibe-stack/main/agent-manager/SKILL.md
 hermes skills install https://raw.githubusercontent.com/woodylin0920-bit/vibe-stack/main/claude-code/SKILL.md
 hermes skills install https://raw.githubusercontent.com/woodylin0920-bit/vibe-stack/main/codex/SKILL.md
+hermes skills install https://raw.githubusercontent.com/woodylin0920-bit/vibe-stack/main/opencode/SKILL.md
 ```
 
 No daemon to run, no port to open, no binary to install — these are **Markdown playbooks** your orchestrator reads. New here? → **[GETTING-STARTED.md](GETTING-STARTED.md)**.
@@ -40,6 +41,7 @@ We compose, we don't compete — see **[docs/ecosystem.md](docs/ecosystem.md)** 
 | [`agent-manager`](agent-manager/SKILL.md) | The **control plane** — open agents, send tasks, drive slash commands/keys remotely, detect prompts, report status, handle auth. Scales to **multi-agent fleets** (lanes, race mode, review gate, merge captain), with model routing and the goal-driven `/loop`. **Start here.** |
 | [`claude-code`](claude-code/SKILL.md) | Drive the **Claude Code CLI** — print vs interactive PTY, flags, settings, slash commands, hooks, subagents, MCP, `--remote-control`. |
 | [`codex`](codex/SKILL.md) | Drive the **OpenAI Codex CLI** — `codex exec`, `--full-auto`/`--yolo`, PTY + git-repo needs, tmux driving. |
+| [`opencode`](opencode/SKILL.md) | Drive the **OpenCode CLI** (sst/opencode) — provider-agnostic alt-screen TUI, `opencode run` one-shot, `opencode auth login`, and idle/working/permission state detection. |
 | [`coffee-time`](coffee-time/SKILL.md) | Multi-agent **brainstorm** — fan one question to N models, synthesize with Opus, present options. |
 
 ## Contents
@@ -49,6 +51,7 @@ bin/            vibe       # shell API Hermes calls to drive tmux agent sessions
 agent-manager/  SKILL.md   # remote control plane for coding agents
 claude-code/    SKILL.md   # Claude Code CLI orchestration guide
 codex/          SKILL.md   # OpenAI Codex CLI orchestration guide
+opencode/       SKILL.md   # OpenCode CLI orchestration guide
 coffee-time/    SKILL.md   # multi-agent brainstorm mode
 dashboard/      server.py  # real-time agent dashboard (phone-friendly)
 docs/           deployment.md · ecosystem.md
