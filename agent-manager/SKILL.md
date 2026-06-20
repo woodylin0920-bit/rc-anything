@@ -1,7 +1,7 @@
 ---
 name: agent-manager
 description: "Remote control plane for coding agents (Claude Code, Codex, OpenCode) — open an agent in a project, send tasks, drive slash commands/keys from a chat app, check status, review output, and handle per-agent auth."
-version: 1.4.0
+version: 1.5.0
 author: Hermes Agent + Teknium
 license: MIT
 platforms: [linux, macos, windows]
@@ -302,6 +302,18 @@ Track lanes on a board: **spec → in-progress → in-review → merged / discar
 ### Prior art
 - **[claude-squad](https://github.com/smtg-ai/claude-squad)** — terminal orchestrator that manages multiple agents (Claude Code, Codex, OpenCode, Amp) with **tmux + git-worktree** isolation; the lane/session model here mirrors it.
 - **[vibe-kanban](https://github.com/BloopAI/vibe-kanban)** — a **Kanban board** where each task card provisions a branch + workspace and flows To-Do → In-Progress → Review → Done with one-click PRs; the task-spec → lane → gate → merge flow here is the same shape.
+
+---
+
+## Ecosystem integrations
+
+vibe-stack **composes; it doesn't reimplement** what others already built well. Inside the fleet/lane model, reach for:
+
+- **Claude → Codex delegation — use [codex-orchestrator](https://github.com/kingbootoshi/codex-orchestrator).** When the pattern is "Claude Code plans/synthesizes, Codex does the deep implementation," don't hand-roll it: run codex-orchestrator (it delegates tasks to Codex via tmux, *designed for* Claude Code orchestration) **inside a lane**. Claude stays the planner; Codex does the coding; vibe-stack carries the whole thing over chat to the user.
+- **Visual TUI / dashboard alongside chat** — [Agent of Empires](https://github.com/agent-of-empires/agent-of-empires) or [claude-squad](https://github.com/smtg-ai/claude-squad) can watch the same tmux sessions you drive; TUI at the desk, chat on the phone.
+- **Turnkey supervised team** — [Batty](https://github.com/battysh/batty) if you want a binary daemon for unattended, test-gated team runs instead of the skill-expressed fleet here.
+
+Full landscape + when-to-use each: [docs/ecosystem.md](../docs/ecosystem.md).
 
 ---
 
