@@ -24,6 +24,8 @@ VIBE_COLS="${VIBE_COLS:-200}"
 VIBE_ROWS="${VIBE_ROWS:-50}"
 VIBE_BOOT_WAIT="${VIBE_BOOT_WAIT:-3}"   # seconds to let the agent UI come up before pasting
 VIBE_SAMPLE="${VIBE_SAMPLE:-0.4}"       # seconds between the two captures used to detect motion
+# Where per-session task descriptions live (one <session>.txt per agent).
+VIBE_STATE_DIR="${VIBE_STATE_DIR:-$HOME/.vibe-stack}"
 
 die() { printf 'vibe: %s\n' "$*" >&2; exit 1; }
 
@@ -92,14 +94,14 @@ detect_state() {
   if printf '%s' "$last" | grep -Eq '^[[:space:]]*❯[[:space:]]*[0-9]' \
      || printf '%s' "$last" | grep -Eq '\(y/[nN]\)|\[y/N\]|\[Y/n\]' \
      || printf '%s\n' "$after" | tail -8 | grep -Eqi \
-        'do you want|trust (this )?folder|do you trust|yes, (i )?accept|no, exit|press enter to|select (one|an option)|choose an option|would you like|overwrite\?|proceed\?|\(use arrow keys\)'; then
+        'do you want|trust (this )?folder|do you trust|yes, (i )?accept|no, exit|press enter to|select (one|an option)|choose an option|would you like|overwrite\?|proceed\?|\(use arrow keys\)|allow once|always allow|grant permission'; then
     printf 'waiting-input'; return
   fi
 
   # working: the pane changed between the two captures, or shows a run signature.
   if [ "$before" != "$after" ] \
      || printf '%s\n' "$after" | tail -6 | grep -Eqi \
-        'esc to interrupt|thinking…|generating|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|✶|✳|✦'; then
+        'esc to interrupt|\binterrupt\b|\bthinking\b|\bgenerating\b|working\.\.\.|working…|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|✶|✳|✦'; then
     printf 'working'; return
   fi
 
@@ -126,6 +128,17 @@ home_short() {
     esac
   fi
   printf '%s' "$p"
+}
+
+# Per-session task-description file (set by `vibe new` / `vibe task`).
+task_dir()  { printf '%s/tasks' "$VIBE_STATE_DIR"; }
+task_file() { printf '%s/%s.txt' "$(task_dir)" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_')"; }
+
+# Seconds → "Xh YYm" (or "Ym" under an hour).
+fmt_elapsed() {
+  local s="$1" h m
+  h=$(( s / 3600 )); m=$(( (s % 3600) / 60 ))
+  if [ "$h" -gt 0 ]; then printf '%dh %02dm' "$h" "$m"; else printf '%dm' "$m"; fi
 }
 
 # Echo the name of every tmux session running a coding agent, one per line.
@@ -267,8 +280,88 @@ cmd_new() {
     sleep 1
   fi
 
+  # OpenCode's alt-screen TUI can take a few seconds to paint; wait for its input
+  # box before pasting so the task doesn't land in a half-drawn frame.
+  if [ "$agent" = "opencode" ]; then
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      capture_tail "$session" 40 | grep -q "Ask anything" && break
+      sleep 0.5
+    done
+  fi
+
   inject "$session" "$task" || die "session $session is up, but pasting the task failed"
+  # Record the task description so `vibe summary` can show what each agent is on.
+  mkdir -p "$(task_dir)" 2>/dev/null && printf '%s\n' "$task" > "$(task_file "$session")" 2>/dev/null || true
   printf 'started %s (%s) in %s\n' "$session" "$agent" "$workdir"
+}
+
+cmd_task() {
+  [ $# -ge 1 ] || die "usage: vibe task <session> [description]"
+  local session="$1"; shift
+  local f; f=$(task_file "$session")
+  if [ $# -eq 0 ]; then            # read
+    [ -f "$f" ] && cat "$f" || true
+    return
+  fi
+  mkdir -p "$(task_dir)" 2>/dev/null || die "cannot create $(task_dir)"
+  printf '%s\n' "$*" > "$f" || die "cannot write $f"
+}
+
+cmd_summary() {
+  local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/vibe.XXXXXX") || die "mktemp failed"
+  trap "rm -rf '$tmp'" EXIT
+  local meta="$tmp/meta"; : > "$meta"
+  local now; now=$(date +%s)
+
+  # Pass 1: discover agent sessions, snapshot pane + created time.
+  local name line cmd rest path created agent key
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    line=$(tmux display-message -p -t "$name" '#{pane_current_command}	#{pane_current_path}	#{session_created}' 2>/dev/null) || continue
+    cmd=${line%%	*}; rest=${line#*	}; path=${rest%%	*}; created=${rest##*	}
+    agent=$(classify "$name" "$cmd") || continue
+    key=$(printf '%s' "$name" | tr -c 'A-Za-z0-9_' '_')
+    capture_tail "$name" > "$tmp/A.$key"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$agent" "$path" "$created" "$key" >> "$meta"
+  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+
+  local count; count=$(grep -c . "$meta" 2>/dev/null || printf 0)
+  if [ "$count" -eq 0 ]; then printf '🤖 vibe-stack status — no agents running\n'; return; fi
+  sleep "$VIBE_SAMPLE"
+
+  local plural=s; [ "$count" -eq 1 ] && plural=''
+  printf '🤖 vibe-stack status — %s agent%s running\n\n' "$count" "$plural"
+
+  local wn=0
+  while IFS=$'\t' read -r name agent path created key; do
+    [ ${#name} -gt "$wn" ] && wn=${#name}
+  done < "$meta"
+
+  local before after state emoji elapsed desc sub
+  while IFS=$'\t' read -r name agent path created key; do
+    before=$(cat "$tmp/A.$key" 2>/dev/null)
+    after=$(capture_tail "$name")
+    state=$(detect_state "$before" "$after")
+    emoji=$(state_emoji "$state")
+    elapsed='?'; case "$created" in ''|*[!0-9]*) ;; *) elapsed=$(fmt_elapsed $(( now - created )));; esac
+    printf '%-*s %s %-13s %s   [%s]\n' "$wn" "$name" "$emoji" "$state" "$(home_short "$path")" "$elapsed"
+    desc=''; [ -f "$(task_file "$name")" ] && desc=$(head -1 "$(task_file "$name")" 2>/dev/null)
+    case "$state" in
+      working)       sub="Task: ${desc:-—}";;
+      waiting-input) sub="Waiting for your input${desc:+ · $desc}";;
+      *)             [ -n "$desc" ] && sub="Last: $desc" || sub="idle";;
+    esac
+    printf '%*s└─ %s\n' "$wn" '' "$sub"
+  done < "$meta"
+
+  # Footer: branches + last commit for the repo at the current directory, if any.
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    local branches lastc
+    branches=$(git branch --format='%(refname:short)' 2>/dev/null | paste -sd ',' - | sed 's/,/, /g')
+    lastc=$(git log -1 --format='%cr (%s)' 2>/dev/null)
+    printf '\nBranches: %s\n' "${branches:-—}"
+    [ -n "$lastc" ] && printf 'Last commit: %s\n' "$lastc"
+  fi
 }
 
 cmd_logs() {
@@ -308,6 +401,8 @@ vibe — shell API for Hermes agent orchestration
 
   vibe status                                   JSON: agent sessions, state, last 3 lines
   vibe status --pretty                          human-readable table (no lines) — for chat/Telegram
+  vibe summary                                  rich overview (state, workdir, elapsed, task) — for chat/Telegram
+  vibe task <session> [description]             get/set a session's task description
   vibe list                                     JSON array of agent session names
   vibe list --pretty                            session names, one per line
   vibe logs <session> [--tail N]                last N lines of the pane (default 20), box-drawing stripped
@@ -327,6 +422,8 @@ main() {
   local sub="$1"; shift
   case "$sub" in
     status)            cmd_status "$@";;
+    summary)           cmd_summary "$@";;
+    task)              cmd_task "$@";;
     list|ls)           cmd_list "$@";;
     logs|log)          cmd_logs "$@";;
     send)              cmd_send "$@";;
