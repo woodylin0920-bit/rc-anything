@@ -45,6 +45,7 @@ We compose, we don't compete — see **[docs/ecosystem.md](docs/ecosystem.md)** 
 ## Contents
 
 ```
+bin/            vibe       # shell API Hermes calls to drive tmux agent sessions
 agent-manager/  SKILL.md   # remote control plane for coding agents
 claude-code/    SKILL.md   # Claude Code CLI orchestration guide
 codex/          SKILL.md   # OpenAI Codex CLI orchestration guide
@@ -53,6 +54,18 @@ dashboard/      server.py  # real-time agent dashboard (phone-friendly)
 docs/           deployment.md · ecosystem.md
 GETTING-STARTED.md          # cloud-first quickstart
 ```
+
+## The `vibe` CLI
+
+`bin/vibe` is the shell API the `agent-manager` skill calls to drive tmux-hosted
+agents — `vibe status` (JSON: every agent session, its state, and last output lines),
+`vibe send`, `vibe new`, and `vibe kill`. Put it on your `PATH`:
+
+```bash
+chmod +x bin/vibe && sudo ln -sf $PWD/bin/vibe /usr/local/bin/vibe
+```
+
+Then `vibe status | jq` from anywhere, or let Hermes call it for you.
 
 ## Deployment
 

@@ -51,19 +51,22 @@ Nothing in this skill is Telegram-specific. Wherever you read "send to the user"
 
 **After dispatching any task, the orchestrator MUST NOT go silent.** Fire-and-forget is forbidden. Proactive polling is mandatory — every other section of this skill exists to serve this rule.
 
-- **Poll after every injection.** 3–5 s after *each* `send-keys` / `paste-buffer`, run `capture-pane` and confirm the agent actually advanced (new output, tool activity, or a prompt). If nothing changed, the input may not have landed (e.g. a dropped Enter) — re-check and re-send.
+- **Poll after every injection.** 3–5 s after *each* `vibe send` (or raw `send-keys` / `paste-buffer`), run `vibe status` and confirm the session flipped to `working` / advanced (new output, tool activity, or a prompt). If nothing changed, the input may not have landed (e.g. a dropped Enter) — re-check and re-send.
 - **Surface prompts the instant they appear — unprompted.** The moment a new prompt / selection / permission / plan-review screen shows up, *at any time* (not only right after a dispatch), push it to the user without being asked. A silent agent sitting on a dialog is a bug, not a pause.
 - **Keep watching until a terminal state.** Continue monitoring (event-driven `watch_patterns` + idle fallback, see below) until the agent is unambiguously **done**, **errored**, or **waiting on the user** — then report.
 - **"Dispatched" ≠ "done."** "I sent the task" is not a result. Only an *observed* outcome (files changed, tests run, commit made) counts as completion.
 
 ### Proactive status reporting (human-facing)
 The human-facing half of never-go-silent — the user should **never have to ask "what's happening?"**
-- **Poll periodically.** Beyond the 3–5 s post-injection check, `capture-pane` every **30–60 s** while a task runs.
+- **Poll periodically.** Beyond the 3–5 s post-injection check, run `vibe status` every **30–60 s** while a task runs — one call snapshots every agent session, so the whole fleet polls in a single command.
 - **Report unprompted on change** — task done, blocked, decision needed, a notable milestone. Don't wait to be asked; don't narrate every line either — report *changes*, not heartbeats.
-- **Consistent format**, one line per agent — `session · status · what it's doing · blocker (if any)`:
+- **Consistent format**, one line per agent — `session · status · what it's doing · blocker (if any)`. Derive it straight from `vibe status`:
+  ```bash
+  vibe status | jq -r '.[] | "\(.session) · \(.state) · \(.lines[-1] // "—") · —"'
+  ```
   ```
   claude-api · working · running auth tests (3/12) · —
-  codex-omni · blocked · permission prompt · needs your OK to write outside the repo
+  codex-omni · waiting-input · permission prompt · needs your OK to write outside the repo
   ```
 - For a fleet, send a compact roll-up (one line per lane) on change; stay quiet when nothing meaningful moved.
 
@@ -84,8 +87,8 @@ The twin of "never go silent." Hermes runs agents **toward the user's stated goa
 ```
 while not done_criteria_met and not blocked_on_a_real_decision:
     dispatch_or_continue(agent, goal)
-    sleep 3–5s; capture-pane                       # never go silent
-    if option / permission / plan screen:  surface_to_user → wait   # user decides
+    sleep 3–5s; vibe status                        # never go silent
+    if state == waiting-input (option/permission/plan screen):  surface_to_user → wait   # user decides
     elif recoverable_error:                feed_back(agent)         # self-heal, no ask
     elif idle_but_incomplete:              nudge(agent, "continue toward: <goal>")
 report(result_to_user)
@@ -136,17 +139,19 @@ tmux send-keys -t claude-api C-m                         # Enter, as its own cal
 
 ## Core operations (verb vocabulary)
 
-What the user asks for, and how the orchestrator does it:
+What the user asks for, and how the orchestrator does it. Hermes drives these through the **`vibe` CLI** (`bin/vibe`) — a thin shell wrapper over the raw tmux mechanics, so the orchestrator calls one stable verb instead of hand-assembling `paste-buffer`/`capture-pane` each time. The right column shows the underlying tmux that `vibe` runs — reach for it directly only when you need something `vibe` doesn't wrap (e.g. control keys, arrow-select).
 
-| Verb | What it means | Mechanism |
-|------|---------------|-----------|
-| **open** | start an agent in a project | `tmux new-session` → launch cmd (pick agent + workdir) |
-| **task** | give it work | inject prompt (paste-buffer + `C-m`) |
-| **status** | is it working / waiting / done? | `tmux capture-pane -p -S -` (+ `watch_patterns`); or `process(action="poll"/"log")` |
-| **review** | see the output | tail `capture-pane`; or parse `--output-format json` result |
-| **control** | slash command / control key | `send-keys` of the slash command or key |
-| **list** | what's running? | `tmux ls` |
-| **stop** | end / clean up | per-agent exit (below) + `tmux kill-session -t <name>` |
+| Verb | What it means | `vibe` command | Underlying tmux |
+|------|---------------|----------------|-----------------|
+| **open** | start an agent in a project | `vibe new <agent> <session> <workdir> "<task>"` | `tmux new-session` → launch cmd (cd + agent) |
+| **task** | give it work | `vibe send <session> "<prompt>"` | paste-buffer + `C-m` (CJK-safe) |
+| **status** | is it working / waiting / done? | `vibe status` → JSON per session (`state`, `lines`) | `capture-pane -p -S -` (+ `watch_patterns`) |
+| **review** | see the output | `vibe status` (read `.lines`) or tail the pane | `capture-pane -p -S -`; or `--output-format json` |
+| **control** | slash command / control key | `vibe send <session> "/compact"`; control keys → raw | `send-keys` of the slash command or key |
+| **list** | what's running? | `vibe status` (one call lists every agent session) | `tmux ls` |
+| **stop** | end / clean up | `vibe kill <session>` | per-agent exit (below) + `tmux kill-session -t <name>` |
+
+> `vibe status` is the polling primitive: one call returns **every** coding-agent session with its detected `state` (`idle` / `working` / `waiting-input`) and last 3 output lines — exactly what the never-go-silent loop and the human-facing roll-up below consume. Install it once (see the repo README); it shells out to the same tmux calls documented here.
 
 ---
 

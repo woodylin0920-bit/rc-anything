@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+#
+# vibe — shell API between the Hermes agent-manager skill and tmux-hosted coding agents.
+#
+# Hermes calls this CLI to poll status and to drive sessions; it is the single
+# choke point for the raw tmux mechanics (paste-buffer for CJK safety, capture-pane
+# parsing, session lifecycle) described in agent-manager/SKILL.md.
+#
+#   vibe status                                  # JSON: every agent session + state + last lines
+#   vibe send <session> <message...>             # inject a message (CJK-safe), press Enter
+#   vibe new  <agent> <session> <workdir> <task> # spawn an agent, cd, paste first prompt
+#   vibe kill <session>                          # tear a session down cleanly
+#
+# Written for bash 3.2 (stock macOS) — no associative arrays / mapfile.
+
+set -u
+
+VIBE_VERSION="1.0.0"
+
+# Which session/command names count as a coding agent (space-separated; override via env).
+VIBE_AGENTS="${VIBE_AGENTS:-claude codex opencode aider gemini cursor amp}"
+# Geometry + boot pacing for `vibe new`.
+VIBE_COLS="${VIBE_COLS:-200}"
+VIBE_ROWS="${VIBE_ROWS:-50}"
+VIBE_BOOT_WAIT="${VIBE_BOOT_WAIT:-3}"   # seconds to let the agent UI come up before pasting
+VIBE_SAMPLE="${VIBE_SAMPLE:-0.4}"       # seconds between the two captures used to detect motion
+
+die() { printf 'vibe: %s\n' "$*" >&2; exit 1; }
+
+command -v tmux >/dev/null 2>&1 || die "tmux not found on PATH — install tmux first"
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+# Sanitize a session name into a tmux-buffer-safe key.
+bufkey() { printf 'vibe_%s' "$(printf '%s' "$1" | tr -c 'A-Za-z0-9_' '_')"; }
+
+# True if a tmux session with this name exists.
+have_session() { tmux has-session -t "$1" 2>/dev/null; }
+
+# Last N lines of a session's active pane (plain text; capture-pane strips ANSI).
+capture_tail() { tmux capture-pane -p -t "$1" -S -"${2:-60}" 2>/dev/null; }
+
+# Escape stdin for embedding inside a JSON string (no surrounding quotes).
+json_escape() {
+  local s; s=$(cat)
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\n'/\\n}
+  printf '%s' "$s" | LC_ALL=C tr -d '\000-\010\013\014\016-\037'
+}
+
+# Map a session to its agent type; echoes the type and returns 0, or returns 1 if
+# the session is not a coding agent. Matches on the name prefix (the documented
+# `<agent>-<project>` convention) first, then on the foreground command.
+classify() {
+  local name="$1" cmd="$2" t prefix="${1%%-*}"
+  for t in $VIBE_AGENTS; do [ "$prefix" = "$t" ] && { printf '%s' "$t"; return 0; }; done
+  for t in $VIBE_AGENTS; do case "$cmd" in *"$t"*) printf '%s' "$t"; return 0;; esac; done
+  return 1
+}
+
+# Inject a message into a session: stage bytes in a paste buffer, paste them
+# (bypasses the IME so a CJK input method can't eat the Enter), then send Enter
+# as its own keystroke. This is the CJK-safe path from agent-manager/SKILL.md.
+inject() {
+  local session="$1" msg="$2" buf
+  buf=$(bufkey "$session")
+  printf '%s' "$msg" | tmux load-buffer -b "$buf" - || return 1
+  tmux paste-buffer -t "$session" -b "$buf" -d || return 1
+  tmux send-keys -t "$session" C-m || return 1
+}
+
+# Classify a pane's state from two captures taken ~VIBE_SAMPLE apart.
+#   waiting-input → blocked on a dialog/menu/confirmation that needs the user
+#   working       → output is moving, or a "running" signature is present
+#   idle          → quiet and ready (done, or an empty prompt)
+detect_state() {
+  local before="$1" after="$2" last
+  last=$(printf '%s\n' "$after" | grep -v '^[[:space:]]*$' | tail -1)
+
+  # waiting: explicit questions / confirmations / a highlighted menu row.
+  if printf '%s' "$last" | grep -Eq '^[[:space:]]*❯[[:space:]]*[0-9]' \
+     || printf '%s' "$last" | grep -Eq '\(y/[nN]\)|\[y/N\]|\[Y/n\]' \
+     || printf '%s\n' "$after" | tail -8 | grep -Eqi \
+        'do you want|trust (this )?folder|do you trust|yes, (i )?accept|no, exit|press enter to|select (one|an option)|choose an option|would you like|overwrite\?|proceed\?|\(use arrow keys\)'; then
+    printf 'waiting-input'; return
+  fi
+
+  # working: the pane changed between the two captures, or shows a run signature.
+  if [ "$before" != "$after" ] \
+     || printf '%s\n' "$after" | tail -6 | grep -Eqi \
+        'esc to interrupt|thinking…|generating|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|✶|✳|✦'; then
+    printf 'working'; return
+  fi
+
+  printf 'idle'
+}
+
+# ── commands ─────────────────────────────────────────────────────────────────
+
+cmd_status() {
+  # Two-pass capture sharing a single sleep, so motion detection costs one
+  # VIBE_SAMPLE regardless of how many sessions are running.
+  local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/vibe.XXXXXX") || die "mktemp failed"
+  trap "rm -rf '$tmp'" EXIT   # expand now so the trap doesn't touch the out-of-scope local
+  local meta="$tmp/meta"; : > "$meta"
+
+  # Pass 1: discover agent sessions, snapshot each pane.
+  local name cmd path agent key line
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    line=$(tmux display-message -p -t "$name" '#{pane_current_command}	#{pane_current_path}' 2>/dev/null) || continue
+    cmd=${line%%	*}; path=${line#*	}
+    agent=$(classify "$name" "$cmd") || continue
+    key=$(printf '%s' "$name" | tr -c 'A-Za-z0-9_' '_')
+    capture_tail "$name" > "$tmp/A.$key"
+    printf '%s\t%s\t%s\t%s\n' "$name" "$agent" "$path" "$key" >> "$meta"
+  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+
+  if [ ! -s "$meta" ]; then echo '[]'; return; fi
+
+  sleep "$VIBE_SAMPLE"
+
+  # Pass 2: re-capture, classify, emit JSON.
+  local out="" first=1 before after state last3 lines_json esc ln
+  while IFS=$'\t' read -r name agent path key; do
+    before=$(cat "$tmp/A.$key" 2>/dev/null)
+    after=$(capture_tail "$name")
+    state=$(detect_state "$before" "$after")
+
+    last3=$(printf '%s\n' "$after" | grep -v '^[[:space:]]*$' | tail -3)
+    lines_json=""
+    if [ -n "$last3" ]; then
+      while IFS= read -r ln || [ -n "$ln" ]; do
+        esc=$(printf '%s' "$ln" | json_escape)
+        [ -n "$lines_json" ] && lines_json="$lines_json,"
+        lines_json="$lines_json\"$esc\""
+      done < <(printf '%s\n' "$last3")
+    fi
+
+    [ "$first" -eq 1 ] && first=0 || out="$out,"
+    out="$out{\"session\":\"$(printf '%s' "$name" | json_escape)\","
+    out="$out\"agent\":\"$(printf '%s' "$agent" | json_escape)\","
+    out="$out\"state\":\"$state\","
+    out="$out\"workdir\":\"$(printf '%s' "$path" | json_escape)\","
+    out="$out\"lines\":[$lines_json]}"
+  done < "$meta"
+
+  printf '[%s]\n' "$out"
+}
+
+cmd_send() {
+  [ $# -ge 2 ] || die "usage: vibe send <session> <message...>"
+  local session="$1"; shift
+  local msg="$*"
+  have_session "$session" || die "no such session: $session"
+  inject "$session" "$msg" || die "failed to send to $session"
+}
+
+cmd_new() {
+  [ $# -ge 4 ] || die "usage: vibe new <agent> <session> <workdir> <task>"
+  local agent="$1" session="$2" workdir="$3" task="$4" launch
+
+  have_session "$session" && die "session already exists: $session"
+  [ -d "$workdir" ] || die "workdir is not a directory: $workdir"
+
+  case "$agent" in
+    claude)   launch="claude ${VIBE_CLAUDE_FLAGS:-}";;
+    codex)    launch="codex ${VIBE_CODEX_FLAGS:-}";;
+    opencode) launch="opencode ${VIBE_OPENCODE_FLAGS:-}";;
+    *)        launch="$agent ${VIBE_AGENT_FLAGS:-}";;   # best-effort for an unknown agent
+  esac
+
+  tmux new-session -d -s "$session" -x "$VIBE_COLS" -y "$VIBE_ROWS" \
+    || die "failed to create session: $session"
+  # cd + launch as one shell line; %q keeps a spaced/odd path safe.
+  tmux send-keys -t "$session" "cd $(printf '%q' "$workdir") && $launch" C-m
+
+  sleep "$VIBE_BOOT_WAIT"
+
+  # First run in a fresh folder shows a workspace-trust dialog — accepting it is
+  # routine (Enter = accept), so clear it before the task lands in the wrong place.
+  if capture_tail "$session" 20 | grep -Eqi 'trust (this )?folder|do you trust'; then
+    tmux send-keys -t "$session" C-m
+    sleep 1
+  fi
+
+  inject "$session" "$task" || die "session $session is up, but pasting the task failed"
+  printf 'started %s (%s) in %s\n' "$session" "$agent" "$workdir"
+}
+
+cmd_kill() {
+  [ $# -ge 1 ] || die "usage: vibe kill <session>"
+  local session="$1"
+  have_session "$session" || die "no such session: $session"
+  tmux kill-session -t "$session" || die "failed to kill $session"
+  tmux delete-buffer -b "$(bufkey "$session")" 2>/dev/null || true
+  printf 'killed %s\n' "$session"
+}
+
+usage() {
+  cat <<'EOF'
+vibe — shell API for Hermes agent orchestration
+
+  vibe status                                   JSON: agent sessions, state, last 3 lines
+  vibe send <session> <message...>              send a message (CJK-safe), press Enter
+  vibe new  <agent> <session> <workdir> <task>  spawn agent (claude|codex|opencode), paste task
+  vibe kill <session>                           tear a session down cleanly
+
+state is one of: idle · working · waiting-input
+
+env: VIBE_AGENTS, VIBE_COLS, VIBE_ROWS, VIBE_BOOT_WAIT, VIBE_SAMPLE,
+     VIBE_CLAUDE_FLAGS / VIBE_CODEX_FLAGS / VIBE_OPENCODE_FLAGS
+EOF
+}
+
+main() {
+  [ $# -ge 1 ] || { usage; exit 1; }
+  local sub="$1"; shift
+  case "$sub" in
+    status)            cmd_status "$@";;
+    send)              cmd_send "$@";;
+    new)               cmd_new "$@";;
+    kill)              cmd_kill "$@";;
+    -h|--help|help)    usage;;
+    -V|--version)      printf 'vibe %s\n' "$VIBE_VERSION";;
+    *)                 die "unknown command: $sub (try: vibe help)";;
+  esac
+}
+
+main "$@"
