@@ -1,7 +1,7 @@
 ---
 name: agent-manager
 description: "Remote control plane for coding agents (Claude Code, Codex, OpenCode) — open an agent in a project, send tasks, drive slash commands/keys from a chat app, check status, review output, and handle per-agent auth."
-version: 1.2.0
+version: 1.3.0
 author: Hermes Agent + Teknium
 license: MIT
 platforms: [linux, macos, windows]
@@ -17,7 +17,7 @@ Drive autonomous coding-agent CLIs (Claude Code, Codex, OpenCode, …) **remotel
 
 This is the **control plane** — it coordinates agents, it does not replace the per-agent skills. For deep per-agent detail, see the sibling [`claude-code`](../claude-code/SKILL.md) skill and the upstream Codex / OpenCode docs.
 
-> **Terminology.** *Orchestrator* = the always-on assistant the user chats with (e.g. Hermes). *Agent* = the coding CLI it launches (Claude Code / Codex / OpenCode). *Chat layer* = wherever the user types (Telegram, Slack, SMS, a web chat, …).
+> **Terminology.** *Orchestrator* = the always-on assistant the user chats with (e.g. Hermes). *Agent* = the coding CLI it launches (Claude Code / Codex / OpenCode). *Channel* = wherever the user types (Telegram, LINE, Slack, web, CLI, …) — see [Channel-agnostic](#channel-agnostic-by-design).
 
 ---
 
@@ -32,7 +32,18 @@ This is the **control plane** — it coordinates agents, it does not replace the
         └────────────── watches the live session (e.g. claude.ai app) ──────┘
 ```
 
+**Who decides:** the **user is the brain and decision-maker.** Hermes is the user's **right hand** — it aggregates, coordinates, executes, and reports back; it **surfaces options and acts on the user's choices**, it does not decide on its own. Throughout this skill, "autonomy" means *executing the user's intent*, never *replacing the user's judgment*.
+
 **The key insight that makes this skill exist:** a user watching a session in a mobile/web app (e.g. the claude.ai app observing a `--remote-control` session) can *see* everything but **cannot inject slash commands or control keys** — there's no way to type `/compact`, `/model`, `/login`, press `Esc`, or pick a menu option from that UI. The orchestrator is the **input layer** that bridges the gap: the user expresses intent in chat, the orchestrator translates it into `tmux send-keys` against the live session.
+
+### Channel-agnostic by design
+Hermes (the orchestrator) is the layer that matters; the chat app is **just an interface**. The same workflows run over **any channel Hermes supports**:
+
+```
+User  →  [any channel: Telegram / LINE / Slack / web / CLI]  →  Hermes (orchestrator)  →  agents
+```
+
+Nothing in this skill is Telegram-specific. Wherever you read "send to the user" or "the user messages the orchestrator," it means *whichever channel they happen to be on*. Pick the channel; the playbook is unchanged.
 
 ---
 
@@ -46,6 +57,29 @@ This is the **control plane** — it coordinates agents, it does not replace the
 - **"Dispatched" ≠ "done."** "I sent the task" is not a result. Only an *observed* outcome (files changed, tests run, commit made) counts as completion.
 
 How the rest of the skill serves this: the [chat-input pattern](#-the-remote-control--chat-input-pattern-first-class) is how you *act*, [prompt detection](#detecting-interactive-prompts-so-the-agent-doesnt-sit-silently) is how you *watch*, and the [Decision Gate](#️-decision-gate) is what you do when watching surfaces a choice.
+
+---
+
+## ⚠️ Drive to the goal — escalate every real decision
+
+The twin of "never go silent." Hermes runs agents **toward the user's stated goal** and handles the mechanical path itself — but it is the user's right hand, so **every real decision goes to the user.** Autonomy here means *execution*, never *deciding*.
+
+- **Execute from the goal, not step-by-step approval.** Given the task spec's `goal` + `done_criteria`, let the agent run the obvious loop — implement → test → fix → re-test — without asking permission for routine progress ("should I run the tests?" → just run them).
+- **Self-heal the mechanical.** Recoverable issues (test failure, lint, a transient error, an idle agent mid-task) → feed back to the agent and continue. These are not decisions.
+- **Escalate every real decision.** Anything irreversible, ambiguous, or a matter of taste — architecture, scope changes, delete vs keep, publish/merge, spending beyond budget, picking among option screens — **stop and ask the user** ([Decision Gate](#️-decision-gate)). The user is the brain; Hermes presents the options and acts on the choice.
+- **Reconciling the principles:** *never go silent* = **visibility** (always watching; surface blockers/prompts; report outcomes). *Drive to the goal* = **execution** (keep doing the routine work without nagging). *User decides* = **authority** (real choices are always the user's). Together: **watch everything, do the routine work, surface every real decision, report the result.**
+
+### The drive loop (`/loop` pattern)
+```
+while not done_criteria_met and not blocked_on_a_real_decision:
+    dispatch_or_continue(agent, goal)
+    sleep 3–5s; capture-pane                       # never go silent
+    if option / permission / plan screen:  surface_to_user → wait   # user decides
+    elif recoverable_error:                feed_back(agent)         # self-heal, no ask
+    elif idle_but_incomplete:              nudge(agent, "continue toward: <goal>")
+report(result_to_user)
+```
+`/loop` inside an interactive agent can schedule this cadence within a session; otherwise the orchestrator runs the loop. Always cap iterations / budget so a stuck loop **escalates to the user** instead of spinning.
 
 ---
 
@@ -173,6 +207,22 @@ For any agent not listed, capture five facts before driving it remotely:
 
 ---
 
+## Model routing — match the model to the job
+
+Route deliberately; different stages want different models.
+
+| Stage | Model | Why |
+|-------|-------|-----|
+| Planning · brainstorming · synthesis · hard review | **Opus 4.8** (`--model opus`, `--effort high`/`max`) | deepest reasoning — worth the cost on the thinking that steers everything else |
+| Implementation · refactors · most coding | **Sonnet** (`--model sonnet`) or **GPT-5.5** (Codex) | strong, fast, cost-effective for well-scoped work |
+| Quick / mechanical (rename, format, one-liners, status) | **Haiku** (`--model haiku`, `--effort low`) | cheapest + fastest; reasoning isn't the bottleneck |
+
+- Spend the big model where a wrong call is expensive (architecture, the task spec itself, merge review, brainstorm synthesis); implement with the mid tier; escalate a stuck lane to Opus.
+- In [race mode](#race-mode), vary models **on purpose** (Opus vs Sonnet vs GPT-5.5) for genuinely diverse attempts.
+- Set it per lane via the task spec's `model:` field; override at launch with `--model` / `--effort` (Claude Code) or `--model` (Codex / OpenCode).
+
+---
+
 ## Multi-agent orchestration (fleets)
 
 Everything above drives **one** agent. To "spawn agents, assign tasks, review output, merge work" you scale to a **fleet** — many agents working in parallel, each isolated, with a disciplined path to `main`. The unit of work is the **lane**.
@@ -202,6 +252,7 @@ The [Prime directive](#️-prime-directive--never-go-silent) applies **per lane*
 Every lane starts from a **task spec** — a small markdown/YAML doc that is the contract the agent builds to and reviewers check against:
 ```yaml
 goal: <one sentence — what success looks like>
+model: <opus | sonnet | gpt-5.5 | haiku — see Model routing; pick for the work's hardest step>
 constraints: [<rules the agent must respect, e.g. "no new deps", "keep API stable">]
 target_files: [<paths likely to change>]
 test_command: <how to verify, e.g. "npm test">
@@ -221,7 +272,7 @@ Use when the approach is uncertain and you'd rather pick from several attempts t
 
 ### Review gate (before any merge)
 
-No lane reaches `main` without passing the gate — surface the result to the user, then let the merge captain decide:
+No lane reaches `main` without passing the gate — surface the result to the user; **on the user's approval**, the merge captain integrates:
 1. **Diff** — `git diff main...lane/<slug>`; scope check: did it touch only the expected `target_files`?
 2. **Tests** — run `test_command`; must pass.
 3. **Reviewer agent (optional)** — a *separate* agent reviews the diff against the spec for correctness, security, and scope creep, e.g. `claude -p 'Review this diff against the task spec. Flag bugs, security, and scope creep.' --max-turns 1`.
@@ -230,7 +281,7 @@ No lane reaches `main` without passing the gate — surface the result to the us
 
 A single **integration role** owns `main`. **Agents never self-merge `main`.**
 - Agents commit only to their `lane/<slug>` branch.
-- The merge captain (a dedicated role/agent, or the orchestrator itself) is the **only** one that merges gate-passing lanes into `main`, **one at a time**, re-running `test_command` after each integration to catch cross-lane conflicts before the next merge.
+- The merge captain (a dedicated role/agent, or the orchestrator acting as integrator) is the **only** one that merges gate-passing lanes into `main` — **on the user's go-ahead**, **one at a time**, re-running `test_command` after each integration to catch cross-lane conflicts before the next merge.
 - This serializes integration, keeps `main` always-green, and prevents racey concurrent merges.
 
 ### Fleet lifecycle (Kanban model)
