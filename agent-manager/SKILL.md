@@ -1,7 +1,7 @@
 ---
 name: agent-manager
 description: "Remote control plane for coding agents (Claude Code, Codex, OpenCode) — open an agent in a project, send tasks, drive slash commands/keys from a chat app, check status, review output, and handle per-agent auth."
-version: 1.5.0
+version: 1.6.0
 author: Hermes Agent + Teknium
 license: MIT
 platforms: [linux, macos, windows]
@@ -276,6 +276,18 @@ done_criteria: [<observable conditions: tests green, lints clean, feature reacha
 ```
 Inject the spec as the agent's first task. The review gate and merge captain judge work against `done_criteria` + `test_command` — not vibes.
 
+### Right-size the work order — max 3 deliverables per agent
+
+**Cap each agent at 3 deliverables per task. Need more? Fan out parallel agents (one lane each), don't pile them on one agent.**
+
+A single agent handed a long backlog goes slow and unfocused — it loses the thread between unrelated items, half-finishes several, and gives you no clean review surface. Three is the ceiling where one agent still holds the whole task in working memory and produces a tight, reviewable diff.
+
+- **Splitting up?** Carve the backlog into independent chunks of ≤3 deliverables and open a [lane](#the-lane-primitive-first-class) per chunk — they run concurrently and each lands as its own reviewable branch.
+- **Truly sequential** (item N depends on N−1)? Keep one lane but feed the deliverables in waves of ≤3, polling each wave to a terminal state before injecting the next.
+- **Each deliverable = one commit** so the review gate stays granular.
+
+> Lesson learned the hard way: one agent given 14 tasks crawled and lost focus; the same 14 split across parallel lanes of ≤3 finished faster and reviewed cleanly.
+
 ### Race mode
 
 Run the **same task spec across multiple agents/worktrees**, then keep the best result:
@@ -353,3 +365,4 @@ After a task finishes, summarize to the user what changed (files, commits, test 
 8. **Clean up tmux sessions** — `tmux kill-session` when done, or they leak. For fleets, also `git worktree remove` + delete the branch, or worktrees pile up.
 9. **Agents self-merging `main`** — forbidden. Agents commit only to `lane/<slug>`; only the [merge captain](#merge-captain) integrates, one lane at a time with tests re-run. Concurrent self-merges corrupt `main`.
 10. **Parallel agents without worktree isolation** — multiple agents in the same working tree clobber each other. One [lane](#the-lane-primitive-first-class) = one `git worktree`, always.
+11. **Overloading one agent with a long backlog** — more than ~3 deliverables and a single agent slows down and loses focus. Cap at 3 per agent; for more, [fan out parallel lanes](#right-size-the-work-order--max-3-deliverables-per-agent).
