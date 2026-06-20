@@ -19,6 +19,8 @@ claude-code/
   SKILL.md    # Claude Code CLI orchestration guide
 codex/
   SKILL.md    # OpenAI Codex CLI orchestration guide
+docs/
+  deployment.md  # run the orchestrator on macOS or a Linux VPS
 ```
 
 ## Install as a Hermes skill
@@ -46,6 +48,10 @@ cp -r agent-manager claude-code codex .claude/skills/
 ```
 
 Claude Code auto-discovers skills in `.claude/skills/` and invokes them by natural language when a task matches the skill's `description`.
+
+## Deployment
+
+The orchestrator runs the same on a Mac or a Linux VPS — see **[docs/deployment.md](docs/deployment.md)** for always-on setup (launchd vs systemd), the macOS keep-awake note, Telegram wiring, and a Mac-vs-cloud trade-off table. Platform-agnostic; pick what fits.
 
 ## Use as a reference
 
