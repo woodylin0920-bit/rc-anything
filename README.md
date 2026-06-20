@@ -11,6 +11,14 @@ claude-code/
   SKILL.md    # the skill guide
 ```
 
+## Install as a Hermes skill
+
+One-liner:
+
+```bash
+hermes skills install https://raw.githubusercontent.com/woodylin0920-bit/rc-anything/main/claude-code/SKILL.md
+```
+
 ## Install as a Claude Code skill
 
 Drop it into your skills directory:
